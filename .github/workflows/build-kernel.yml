@@ -1,0 +1,135 @@
+name: Build Kernel 5.15 SukiSU-Ultra + SuSFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_SOURCE:
+        description: 'Kernel Source Repository (misal: username/repo)'
+        required: true
+        default: 'torvalds/linux'
+      KERNEL_BRANCH:
+        description: 'Kernel Source Branch'
+        required: true
+        default: 'master'
+      DEFCONFIG_NAME:
+        description: 'Defconfig File Name (misal: gki_defconfig atau vendor_defconfig)'
+        required: true
+        default: 'gki_defconfig'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.KERNEL_SOURCE }}
+          ref: ${{ github.event.inputs.KERNEL_BRANCH }}
+          path: kernel_workspace
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev build-essential zip curl git wget libcfitsio-dev
+
+      - name: Setup Toolchain (Clang & GCC)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          cd $GITHUB_WORKSPACE/toolchain
+          
+          # Download Clang 17
+          wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu.tar.xz
+          tar -xf clang+llvm-17.0.6-x86_64-linux-gnu.tar.xz --strip-components=1
+          
+          # Download GCC cross-compilers
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 gcc64
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 gcc32
+
+      - name: Integrate SukiSU-Ultra & SuSFS
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+
+          # 1. Setup SukiSU-Ultra (rifs28 / KSU-Next)
+          curl -LSs "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+
+          # 2. Clone SuSFS branch gki-android13-5.15
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs
+
+          # 3. Apply Patch SuSFS ke Kernel 5.15
+          cp susfs/kernel_patches/fs/susfs.c fs/
+          cp susfs/kernel_patches/include/linux/susfs.h include/linux/
+          patch -p1 < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch || true
+
+          # 4. Apply Patch SuSFS ke SukiSU-Ultra
+          cd drivers/kernelsu
+          patch -p1 < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+          cd ../..
+
+      - name: Configure Defconfig
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          
+          DEFCONFIG_PATH=$(find arch/arm64/configs/ -name "${{ github.event.inputs.DEFCONFIG_NAME }}" | head -n 1)
+          
+          if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "Defconfig ${{ github.event.inputs.DEFCONFIG_NAME }} tidak ditemukan di arch/arm64/configs/"
+            exit 1
+          fi
+          
+          echo "Injecting SuSFS + SukiSU configs into $DEFCONFIG_PATH"
+          cat <<EOF >> $DEFCONFIG_PATH
+          
+          # SukiSU-Ultra & SuSFS Configs
+          CONFIG_KSU=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSUD=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME-RELEASE=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          EOF
+
+      - name: Build Kernel
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$GITHUB_WORKSPACE/toolchain/gcc64/bin:$GITHUB_WORKSPACE/toolchain/gcc32/bin:$PATH"
+          
+          make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG_NAME }}
+          make -j$(nproc) O=out ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+      - name: Pack Kernel Output
+        run: |
+          cd $GITHUB_WORKSPACE/kernel_workspace
+          mkdir -p output
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz output/
+          fi
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image output/
+          fi
+          cd output
+          zip -r kernel-5.15-sukisu-susfs.zip ./*
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-5.15-SukiSU-SuSFS
+          path: kernel_workspace/output/kernel-5.15-sukisu-susfs.zip
