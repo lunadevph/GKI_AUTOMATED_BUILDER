@@ -23,6 +23,48 @@ on:
         required: true
         default: 'PureKernel-LunaDevPH'
 
+      ENABLE_SUSFS:
+        description: 'Enable SuSFS'
+        required: true
+        type: boolean
+        default: true
+
+      ENABLE_BBG:
+        description: 'Enable Baseband Guard (BBG)'
+        required: true
+        type: boolean
+        default: false
+
+      ENABLE_WILD_PATCHES:
+        description: 'Enable compatible WildKernels patches'
+        required: true
+        type: boolean
+        default: false
+
+      ENABLE_BBR:
+        description: 'Enable BBR congestion control'
+        required: true
+        type: boolean
+        default: true
+
+      ENABLE_WIREGUARD:
+        description: 'Enable WireGuard'
+        required: true
+        type: boolean
+        default: false
+
+      ENABLE_IPSET:
+        description: 'Enable IPSet'
+        required: true
+        type: boolean
+        default: false
+
+      ENABLE_CAFe:
+        description: 'Enable CAKE/fq_codel networking'
+        required: true
+        type: boolean
+        default: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -57,25 +99,24 @@ jobs:
       - name: Verify Kernel Source
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           echo "=========================================="
-          echo "Kernel Source"
+          echo "KERNEL SOURCE"
           echo "=========================================="
 
           echo "Repository:"
           git remote get-url origin
 
-          echo "Branch:"
-          git branch --show-current
+          echo "Commit:"
+          git rev-parse --short HEAD
 
           echo
-          echo "Checking kernel tree..."
 
           test -f Makefile || {
-            echo "ERROR: Makefile not found."
+            echo "ERROR: Kernel Makefile not found."
             exit 1
           }
 
@@ -85,7 +126,7 @@ jobs:
           }
 
           test -d drivers || {
-            echo "ERROR: drivers directory not found."
+            echo "ERROR: drivers/ not found."
             exit 1
           }
 
@@ -98,7 +139,7 @@ jobs:
       - name: Install Build Dependencies
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           sudo apt-get update
 
@@ -117,6 +158,7 @@ jobs:
             llvm \
             lld \
             ccache \
+            patch \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
 
@@ -124,10 +166,19 @@ jobs:
       # CCACHE
       # ============================================================
 
-      - name: Setup ccache
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-${{ hashFiles('kernel_workspace/Makefile', 'kernel_workspace/arch/arm64/configs/**') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-
+            ccache-${{ runner.os }}-
+
+      - name: Configure ccache
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p "$HOME/.cache/ccache"
 
@@ -137,22 +188,10 @@ jobs:
 
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
 
-          echo "=========================================="
-          echo "ccache configuration"
-          echo "=========================================="
-
-          ccache --version
-          ccache --show-config
           ccache --zero-stats
 
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-${{ hashFiles('kernel_workspace/Makefile', 'kernel_workspace/arch/arm64/configs/${{ inputs.DEFCONFIG_NAME }}') }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-
-            ccache-${{ runner.os }}-
+          echo "ccache configured:"
+          ccache --show-config
 
       # ============================================================
       # KERNELSU-NEXT
@@ -161,17 +200,15 @@ jobs:
       - name: Install KernelSU-Next
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           echo "=========================================="
-          echo "KernelSU-Next"
+          echo "KERNELSU-NEXT"
           echo "=========================================="
 
           SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
-
-          echo "Downloading setup script..."
 
           curl -fL \
             "$SETUP_URL" \
@@ -193,14 +230,15 @@ jobs:
       # ============================================================
 
       - name: Clone SuSFS
+        if: ${{ inputs.ENABLE_SUSFS }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           echo "=========================================="
-          echo "SuSFS"
+          echo "SUSFS"
           echo "=========================================="
 
           git clone \
@@ -210,41 +248,34 @@ jobs:
             https://gitlab.com/simonpunk/susfs4ksu.git \
             susfs
 
-          test -d susfs || {
-            echo "ERROR: SuSFS clone failed."
-            exit 1
-          }
-
           echo
           echo "SuSFS commit:"
           git -C susfs rev-parse HEAD
 
           echo
-          echo "SuSFS kernel patches:"
-          find susfs/kernel_patches -type f | sort
+          echo "Available kernel patches:"
+          find susfs/kernel_patches \
+            -type f \
+            -name '*.patch' \
+            | sort
 
-      # ============================================================
-      # FIND SUSFS KERNEL PATCH
-      # ============================================================
-
-      - name: Locate SuSFS Kernel Patch
+      - name: Apply SuSFS
+        if: ${{ inputs.ENABLE_SUSFS }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Searching for SuSFS kernel patch..."
+          echo "=========================================="
+          echo "APPLYING SUSFS"
+          echo "=========================================="
 
-          SUSFS_PATCH="$(
-            find susfs/kernel_patches \
-              -type f \
-              -name '50_add_susfs_in_kernel-*.patch' \
-              | head -n 1
-          )"
+          SUSFS_KERNEL_PATCH="susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
 
-          if [ -z "$SUSFS_PATCH" ]; then
-            echo "ERROR: No 50_add_susfs_in_kernel patch found."
+          test -f "$SUSFS_KERNEL_PATCH" || {
+            echo "ERROR: Expected SuSFS patch not found:"
+            echo "$SUSFS_KERNEL_PATCH"
 
             echo
             echo "Available patches:"
@@ -254,26 +285,9 @@ jobs:
               | sort
 
             exit 1
-          fi
+          }
 
-          echo "Found:"
-          echo "$SUSFS_PATCH"
-
-          echo "SUSFS_PATCH=$GITHUB_WORKSPACE/kernel_workspace/$SUSFS_PATCH" >> "$GITHUB_ENV"
-
-      # ============================================================
-      # COPY SUSFS FILES
-      # ============================================================
-
-      - name: Copy SuSFS Kernel Files
-        shell: bash
-        run: |
-          set -e
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          echo "Copying SuSFS files..."
-
+          # Required SuSFS source files.
           cp \
             susfs/kernel_patches/fs/susfs.c \
             fs/susfs.c
@@ -282,46 +296,42 @@ jobs:
             susfs/kernel_patches/include/linux/susfs.h \
             include/linux/susfs.h
 
-          echo "SuSFS files copied."
+          # These are required by the current GKI 5.15 patch.
+          if [ -f susfs/kernel_patches/fs/sus_su.c ]; then
+            cp \
+              susfs/kernel_patches/fs/sus_su.c \
+              fs/sus_su.c
+          fi
 
-      # ============================================================
-      # APPLY SUSFS KERNEL PATCH
-      # ============================================================
+          if [ -f susfs/kernel_patches/include/linux/sus_su.h ]; then
+            cp \
+              susfs/kernel_patches/include/linux/sus_su.h \
+              include/linux/sus_su.h
+          fi
 
-      - name: Apply SuSFS Kernel Patch
-        shell: bash
-        run: |
-          set -e
+          if [ -f susfs/kernel_patches/include/linux/susfs_def.h ]; then
+            cp \
+              susfs/kernel_patches/include/linux/susfs_def.h \
+              include/linux/susfs_def.h
+          fi
 
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          echo "Applying:"
+          echo "$SUSFS_KERNEL_PATCH"
 
-          echo "=========================================="
-          echo "Applying SuSFS kernel patch"
-          echo "=========================================="
-
-          echo "Patch:"
-          echo "$SUSFS_PATCH"
-
-          patch \
-            -p1 \
-            < "$SUSFS_PATCH"
+          patch -p1 < "$SUSFS_KERNEL_PATCH"
 
           echo "SuSFS kernel patch applied."
 
-      # ============================================================
-      # APPLY KERNELSU SUSFS PATCH
-      # ============================================================
-
-      - name: Apply SuSFS KernelSU-Next Patch
+      - name: Apply SuSFS KernelSU Patch
+        if: ${{ inputs.ENABLE_SUSFS }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           test -d drivers/kernelsu || {
-            echo "ERROR: drivers/kernelsu was not found."
-            echo "KernelSU-Next installation failed."
+            echo "ERROR: drivers/kernelsu not found."
             exit 1
           }
 
@@ -331,24 +341,180 @@ jobs:
               exit 1
             }
 
-          echo "Applying KernelSU SuSFS patch..."
-
           cd drivers/kernelsu
 
-          patch \
-            -p1 \
+          patch -p1 \
             < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
           echo "KernelSU SuSFS patch applied."
 
       # ============================================================
-      # CONFIGURE DEFCONFIG
+      # BBG
       # ============================================================
 
-      - name: Configure Defconfig
+      - name: Install Baseband Guard
+        if: ${{ inputs.ENABLE_BBG }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "=========================================="
+          echo "BASEBAND GUARD"
+          echo "=========================================="
+
+          git clone \
+            --depth=1 \
+            https://github.com/vc-teahouse/Baseband-guard.git \
+            baseband-guard
+
+          echo "BBG source downloaded."
+
+          echo
+          echo "BBG files:"
+          find baseband-guard \
+            -maxdepth 2 \
+            -type f \
+            | sort \
+            | head -100
+
+      - name: Integrate Baseband Guard
+        if: ${{ inputs.ENABLE_BBG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Searching for BBG kernel patch..."
+
+          BBG_PATCH="$(
+            find baseband-guard \
+              -type f \
+              \( \
+                -name '*.patch' \
+                -o \
+                -name '*.diff' \
+              \) \
+              | head -n 1
+          )"
+
+          if [ -z "$BBG_PATCH" ]; then
+            echo "ERROR: No BBG patch was found."
+            echo "The BBG repository layout may have changed."
+            echo
+            echo "Files:"
+            find baseband-guard \
+              -type f \
+              | sort \
+              | head -200
+            exit 1
+          fi
+
+          echo "Using BBG patch:"
+          echo "$BBG_PATCH"
+
+          patch -p1 < "$BBG_PATCH"
+
+      # ============================================================
+      # WILDKERNELS PATCHES
+      # ============================================================
+
+      - name: Clone WildKernels Kernel Patches
+        if: ${{ inputs.ENABLE_WILD_PATCHES }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "=========================================="
+          echo "WILDKERNELS PATCHES"
+          echo "=========================================="
+
+          git clone \
+            --depth=1 \
+            https://github.com/WildKernels/kernel_patches.git \
+            wildkernel_patches
+
+          echo "WildKernels patches downloaded."
+
+          echo
+          echo "Available patches:"
+          find wildkernel_patches \
+            -type f \
+            -name '*.patch' \
+            | sort
+
+      - name: Apply WildKernels Compatibility Patches
+        if: ${{ inputs.ENABLE_WILD_PATCHES }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "=========================================="
+          echo "WILDKERNELS COMPATIBILITY PATCHES"
+          echo "=========================================="
+
+          KERNEL_VERSION="$(
+            make -s \
+              O=out \
+              ARCH=arm64 \
+              kernelversion 2>/dev/null \
+              || true
+          )"
+
+          echo "Kernel version: $KERNEL_VERSION"
+
+          # WildKernels has a GKI ptrace patch specifically intended
+          # for older kernels. Apply it only to 5.15.
+          if [[ "$KERNEL_VERSION" == 5.15* ]]; then
+
+            if [ -f wildkernel_patches/gki_ptrace.patch ]; then
+              echo "Applying GKI ptrace compatibility patch..."
+
+              patch -p1 \
+                < wildkernel_patches/gki_ptrace.patch
+            else
+              echo "gki_ptrace.patch not present; skipping."
+            fi
+
+          fi
+
+          # Manual-hook patch from WildKernels.
+          #
+          # Only apply it when the KernelSU tree exposes the
+          # non-kprobe hook configuration.
+          if [ -f wildkernel_patches/next/scope_min_manual_hooks_v1.4.patch ]; then
+
+            if grep -Rqs \
+              "CONFIG_KSU_KPROBES_HOOK" \
+              drivers/kernelsu \
+              2>/dev/null; then
+
+              echo "Applying WildKernels manual-hook patch..."
+
+              patch -p1 \
+                < wildkernel_patches/next/scope_min_manual_hooks_v1.4.patch
+
+            else
+              echo "KernelSU kprobe configuration not detected."
+              echo "Skipping manual-hook patch."
+            fi
+
+          fi
+
+      # ============================================================
+      # DEFCONFIG
+      # ============================================================
+
+      - name: Configure Kernel
+        shell: bash
+        run: |
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
@@ -360,21 +526,12 @@ jobs:
           )"
 
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "ERROR: Defconfig '${{ inputs.DEFCONFIG_NAME }}' not found."
-
-            echo
-            echo "Available ARM64 defconfigs:"
-            find arch/arm64/configs \
-              -maxdepth 1 \
-              -type f \
-              -printf '%f\n' \
-              | sort \
-              | head -100
-
+            echo "ERROR: Defconfig not found:"
+            echo "${{ inputs.DEFCONFIG_NAME }}"
             exit 1
           fi
 
-          echo "Using defconfig:"
+          echo "Using:"
           echo "$DEFCONFIG_PATH"
 
           cat >> "$DEFCONFIG_PATH" <<EOF
@@ -389,7 +546,12 @@ jobs:
           # SuSFS
           # ==========================================================
 
-          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS=${{ inputs.ENABLE_SUSFS && 'y' || 'n' }}
+
+          # ==========================================================
+          # SuSFS Features
+          # ==========================================================
+
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -402,20 +564,52 @@ jobs:
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 
           # ==========================================================
-          # Custom Kernel Name
+          # Kernel Name
           # ==========================================================
 
           CONFIG_LOCALVERSION="-${{ inputs.KERNEL_NAME }}"
+
+          # ==========================================================
+          # BBR
+          # ==========================================================
+
+          CONFIG_TCP_CONG_BBR=${{ inputs.ENABLE_BBR && 'y' || 'n' }}
+
+          # ==========================================================
+          # WireGuard
+          # ==========================================================
+
+          CONFIG_WIREGUARD=${{ inputs.ENABLE_WIREGUARD && 'y' || 'n' }}
+
+          # ==========================================================
+          # IPSet
+          # ==========================================================
+
+          CONFIG_IP_SET=${{ inputs.ENABLE_IPSET && 'y' || 'n' }}
+          CONFIG_IP_SET_MAX=256
+
+          # ==========================================================
+          # CAKE / fq_codel
+          # ==========================================================
+
+          CONFIG_NET_SCH_FQ_CODEL=${{ inputs.ENABLE_CAFe && 'y' || 'n' }}
+          CONFIG_NET_SCH_CAKE=${{ inputs.ENABLE_CAFe && 'y' || 'n' }}
+
+          # ==========================================================
+          # BBG
+          # ==========================================================
+
+          CONFIG_BBG=${{ inputs.ENABLE_BBG && 'y' || 'n' }}
           EOF
 
       # ============================================================
-      # PREPARE CONFIG
+      # CONFIGURE
       # ============================================================
 
       - name: Prepare Kernel Configuration
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
@@ -424,30 +618,12 @@ jobs:
             ARCH=arm64 \
             "${{ inputs.DEFCONFIG_NAME }}"
 
-      # ============================================================
-      # ENABLE CCACHE
-      # ============================================================
-
-      - name: Configure Compiler Cache
-        shell: bash
-        run: |
-          set -e
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          echo "=========================================="
-          echo "Configuring ccache"
-          echo "=========================================="
-
-          export PATH="/usr/lib/ccache:$PATH"
-
-          ccache --set-config=cache_dir="$HOME/.cache/ccache"
-          ccache --set-config=max_size=5G
-          ccache --set-config=compression=true
-
-          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
-
-          ccache --show-stats
+          echo
+          echo "Important configuration:"
+          grep -E \
+            'CONFIG_KSU=|CONFIG_KSU_SUSFS=|CONFIG_BBG=|CONFIG_TCP_CONG_BBR=|CONFIG_WIREGUARD=|CONFIG_IP_SET=|CONFIG_NET_SCH_(CAKE|FQ_CODEL)=' \
+            out/.config \
+            || true
 
       # ============================================================
       # BUILD
@@ -456,25 +632,28 @@ jobs:
       - name: Build Kernel
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           export PATH="/usr/lib/ccache:$PATH"
 
           echo "=========================================="
-          echo "Building Kernel"
+          echo "BUILDING KERNEL"
           echo "=========================================="
 
+          echo "Kernel:"
+          make -s \
+            O=out \
+            ARCH=arm64 \
+            kernelversion
+
+          echo
           echo "Compiler:"
           clang --version | head -n 1
 
           echo
-          echo "ccache:"
-          ccache --version | head -n 1
-
-          echo
-          echo "Starting build..."
+          echo "Building..."
 
           make -j"$(nproc)" \
             O=out \
@@ -489,7 +668,7 @@ jobs:
       # CCACHE STATS
       # ============================================================
 
-      - name: Show ccache Statistics
+      - name: ccache Statistics
         if: always()
         shell: bash
         run: |
@@ -499,31 +678,32 @@ jobs:
       # VERIFY
       # ============================================================
 
-      - name: Verify Kernel Image
+      - name: Verify Kernel
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "=========================================="
-          echo "Kernel Output"
-          echo "=========================================="
-
-          if [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "ERROR: Image was not generated."
+          test -f out/arch/arm64/boot/Image || {
+            echo "ERROR: Kernel Image was not generated."
             exit 1
-          fi
+          }
 
-          echo "Image: OK"
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
+          echo "Image:"
+          ls -lh out/arch/arm64/boot/Image
 
           if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "Image.gz: OK"
+            echo "Image.gz:"
+            ls -lh out/arch/arm64/boot/Image.gz
           fi
 
           echo
           echo "Kernel version:"
-
           make -s \
             O=out \
             ARCH=arm64 \
@@ -531,9 +711,7 @@ jobs:
 
           echo
           echo "Local version:"
-
-          grep '^CONFIG_LOCALVERSION=' \
-            out/.config || true
+          grep '^CONFIG_LOCALVERSION=' out/.config || true
 
       # ============================================================
       # PACKAGE
@@ -542,7 +720,7 @@ jobs:
       - name: Pack Kernel
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
