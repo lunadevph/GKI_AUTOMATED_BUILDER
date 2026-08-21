@@ -14,12 +14,12 @@ on:
         default: 'master'
 
       DEFCONFIG_NAME:
-        description: 'Defconfig File Name (e.g. gki_defconfig or vendor_defconfig)'
+        description: 'Defconfig File Name'
         required: true
         default: 'gki_defconfig'
 
       KERNEL_NAME:
-        description: 'Kernel Name Suffix (e.g. PureKernel-LunaDevPH)'
+        description: 'Kernel Name Suffix'
         required: true
         default: 'PureKernel-LunaDevPH'
 
@@ -116,8 +116,43 @@ jobs:
             clang \
             llvm \
             lld \
+            ccache \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi
+
+      # ============================================================
+      # CCACHE
+      # ============================================================
+
+      - name: Setup ccache
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$HOME/.cache/ccache"
+
+          ccache --set-config=cache_dir="$HOME/.cache/ccache"
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+
+          echo "=========================================="
+          echo "ccache configuration"
+          echo "=========================================="
+
+          ccache --version
+          ccache --show-config
+          ccache --zero-stats
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-${{ hashFiles('kernel_workspace/Makefile', 'kernel_workspace/arch/arm64/configs/${{ inputs.DEFCONFIG_NAME }}') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ inputs.KERNEL_SOURCE }}-${{ inputs.KERNEL_BRANCH }}-
+            ccache-${{ runner.os }}-
 
       # ============================================================
       # KERNELSU-NEXT
@@ -136,8 +171,7 @@ jobs:
 
           SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
 
-          echo "Downloading:"
-          echo "$SETUP_URL"
+          echo "Downloading setup script..."
 
           curl -fL \
             "$SETUP_URL" \
@@ -181,38 +215,74 @@ jobs:
             exit 1
           }
 
-          echo "SuSFS cloned successfully."
+          echo
+          echo "SuSFS commit:"
+          git -C susfs rev-parse HEAD
 
-      - name: Verify SuSFS
+          echo
+          echo "SuSFS kernel patches:"
+          find susfs/kernel_patches -type f | sort
+
+      # ============================================================
+      # FIND SUSFS KERNEL PATCH
+      # ============================================================
+
+      - name: Locate SuSFS Kernel Patch
         shell: bash
         run: |
           set -e
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Checking SuSFS files..."
+          echo "Searching for SuSFS kernel patch..."
 
-          test -f susfs/kernel_patches/fs/susfs.c || {
-            echo "ERROR: susfs.c not found."
+          SUSFS_PATCH="$(
+            find susfs/kernel_patches \
+              -type f \
+              -name '50_add_susfs_in_kernel-*.patch' \
+              | head -n 1
+          )"
+
+          if [ -z "$SUSFS_PATCH" ]; then
+            echo "ERROR: No 50_add_susfs_in_kernel patch found."
+
+            echo
+            echo "Available patches:"
+            find susfs/kernel_patches \
+              -type f \
+              -name '*.patch' \
+              | sort
+
             exit 1
-          }
+          fi
 
-          test -f susfs/kernel_patches/include/linux/susfs.h || {
-            echo "ERROR: susfs.h not found."
-            exit 1
-          }
+          echo "Found:"
+          echo "$SUSFS_PATCH"
 
-          test -f susfs/kernel_patches/5.15/5.15_ksu_susfs.patch || {
-            echo "ERROR: 5.15_ksu_susfs.patch not found."
-            exit 1
-          }
+          echo "SUSFS_PATCH=$GITHUB_WORKSPACE/kernel_workspace/$SUSFS_PATCH" >> "$GITHUB_ENV"
 
-          test -f susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || {
-            echo "ERROR: KernelSU SuSFS patch not found."
-            exit 1
-          }
+      # ============================================================
+      # COPY SUSFS FILES
+      # ============================================================
 
-          echo "All required SuSFS files found."
+      - name: Copy SuSFS Kernel Files
+        shell: bash
+        run: |
+          set -e
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Copying SuSFS files..."
+
+          cp \
+            susfs/kernel_patches/fs/susfs.c \
+            fs/susfs.c
+
+          cp \
+            susfs/kernel_patches/include/linux/susfs.h \
+            include/linux/susfs.h
+
+          echo "SuSFS files copied."
 
       # ============================================================
       # APPLY SUSFS KERNEL PATCH
@@ -225,23 +295,21 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Copying SuSFS source..."
+          echo "=========================================="
+          echo "Applying SuSFS kernel patch"
+          echo "=========================================="
 
-          cp \
-            susfs/kernel_patches/fs/susfs.c \
-            fs/susfs.c
+          echo "Patch:"
+          echo "$SUSFS_PATCH"
 
-          cp \
-            susfs/kernel_patches/include/linux/susfs.h \
-            include/linux/susfs.h
+          patch \
+            -p1 \
+            < "$SUSFS_PATCH"
 
-          echo "Applying Linux 5.15 SuSFS patch..."
-
-          patch -p1 \
-            < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch
+          echo "SuSFS kernel patch applied."
 
       # ============================================================
-      # APPLY SUSFS KERNELSU PATCH
+      # APPLY KERNELSU SUSFS PATCH
       # ============================================================
 
       - name: Apply SuSFS KernelSU-Next Patch
@@ -251,23 +319,30 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          if [ ! -d drivers/kernelsu ]; then
+          test -d drivers/kernelsu || {
             echo "ERROR: drivers/kernelsu was not found."
             echo "KernelSU-Next installation failed."
             exit 1
-          fi
+          }
 
-          cd drivers/kernelsu
+          test -f \
+            susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || {
+              echo "ERROR: KernelSU SuSFS patch not found."
+              exit 1
+            }
 
           echo "Applying KernelSU SuSFS patch..."
 
-          patch -p1 \
+          cd drivers/kernelsu
+
+          patch \
+            -p1 \
             < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
           echo "KernelSU SuSFS patch applied."
 
       # ============================================================
-      # DEFCONFIG
+      # CONFIGURE DEFCONFIG
       # ============================================================
 
       - name: Configure Defconfig
@@ -286,15 +361,21 @@ jobs:
 
           if [ -z "$DEFCONFIG_PATH" ]; then
             echo "ERROR: Defconfig '${{ inputs.DEFCONFIG_NAME }}' not found."
+
+            echo
+            echo "Available ARM64 defconfigs:"
+            find arch/arm64/configs \
+              -maxdepth 1 \
+              -type f \
+              -printf '%f\n' \
+              | sort \
+              | head -100
+
             exit 1
           fi
 
-          echo "Using:"
+          echo "Using defconfig:"
           echo "$DEFCONFIG_PATH"
-
-          echo
-          echo "Kernel name:"
-          echo "${{ inputs.KERNEL_NAME }}"
 
           cat >> "$DEFCONFIG_PATH" <<EOF
 
@@ -344,6 +425,31 @@ jobs:
             "${{ inputs.DEFCONFIG_NAME }}"
 
       # ============================================================
+      # ENABLE CCACHE
+      # ============================================================
+
+      - name: Configure Compiler Cache
+        shell: bash
+        run: |
+          set -e
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "=========================================="
+          echo "Configuring ccache"
+          echo "=========================================="
+
+          export PATH="/usr/lib/ccache:$PATH"
+
+          ccache --set-config=cache_dir="$HOME/.cache/ccache"
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+
+          ccache --show-stats
+
+      # ============================================================
       # BUILD
       # ============================================================
 
@@ -354,21 +460,43 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
+          export PATH="/usr/lib/ccache:$PATH"
+
           echo "=========================================="
           echo "Building Kernel"
           echo "=========================================="
 
+          echo "Compiler:"
+          clang --version | head -n 1
+
+          echo
+          echo "ccache:"
+          ccache --version | head -n 1
+
+          echo
+          echo "Starting build..."
+
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
-            CC=clang \
+            CC="ccache clang" \
             LLVM=1 \
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
       # ============================================================
-      # VERIFY OUTPUT
+      # CCACHE STATS
+      # ============================================================
+
+      - name: Show ccache Statistics
+        if: always()
+        shell: bash
+        run: |
+          ccache --show-stats || true
+
+      # ============================================================
+      # VERIFY
       # ============================================================
 
       - name: Verify Kernel Image
@@ -402,7 +530,7 @@ jobs:
             kernelversion
 
           echo
-          echo "CONFIG_LOCALVERSION:"
+          echo "Local version:"
 
           grep '^CONFIG_LOCALVERSION=' \
             out/.config || true
