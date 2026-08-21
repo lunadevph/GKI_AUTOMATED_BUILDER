@@ -11,23 +11,27 @@ on:
       KERNEL_BRANCH:
         description: 'Kernel Source Branch'
         required: true
-        default: 'main'
+        default: 'master'
 
       DEFCONFIG_NAME:
-        description: 'Defconfig File Name'
+        description: 'Defconfig File Name (e.g. gki_defconfig or vendor_defconfig)'
         required: true
         default: 'gki_defconfig'
 
       KERNEL_NAME:
-        description: 'Kernel Name Suffix (example: PureKernel-LunaDevPH)'
+        description: 'Kernel Name Suffix (e.g. PureKernel-LunaDevPH)'
         required: true
-        default: '-PureKernel-LunaDevPH'
+        default: 'PureKernel-LunaDevPH'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # BUILD SPACE
+      # ============================================================
 
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@v10
@@ -38,17 +42,66 @@ jobs:
           remove-android: 'true'
           remove-haskell: 'true'
 
+      # ============================================================
+      # KERNEL SOURCE
+      # ============================================================
+
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.inputs.KERNEL_SOURCE }}
-          ref: ${{ github.event.inputs.KERNEL_BRANCH }}
+          repository: ${{ inputs.KERNEL_SOURCE }}
+          ref: ${{ inputs.KERNEL_BRANCH }}
           path: kernel_workspace
           fetch-depth: 1
 
-      - name: Install Build Dependencies
+      - name: Verify Kernel Source
+        shell: bash
         run: |
-          sudo apt-get update && \
+          set -e
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "=========================================="
+          echo "Kernel Source"
+          echo "=========================================="
+
+          echo "Repository:"
+          git remote get-url origin
+
+          echo "Branch:"
+          git branch --show-current
+
+          echo
+          echo "Checking kernel tree..."
+
+          test -f Makefile || {
+            echo "ERROR: Makefile not found."
+            exit 1
+          }
+
+          test -d arch/arm64 || {
+            echo "ERROR: arch/arm64 not found."
+            exit 1
+          }
+
+          test -d drivers || {
+            echo "ERROR: drivers directory not found."
+            exit 1
+          }
+
+          echo "Kernel source OK."
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
@@ -62,42 +115,32 @@ jobs:
             wget \
             clang \
             llvm \
-            lld
+            lld \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi
 
-      - name: Check Kernel Source
+      # ============================================================
+      # KERNELSU-NEXT
+      # ============================================================
+
+      - name: Install KernelSU-Next
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Kernel source:"
-          git remote -v
+          echo "=========================================="
+          echo "KernelSU-Next"
+          echo "=========================================="
 
-          echo
-          echo "Kernel branch:"
-          git branch --show-current
+          SETUP_URL="https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh"
 
-          echo
-          echo "Checking kernel tree..."
-
-          test -d drivers || {
-            echo "ERROR: drivers/ directory not found."
-            exit 1
-          }
-
-          test -d arch/arm64 || {
-            echo "ERROR: arch/arm64/ directory not found."
-            exit 1
-          }
-
-          echo "Kernel source looks valid."
-
-      - name: Integrate KernelSU-Next
-        run: |
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          echo "Downloading KernelSU-Next setup script..."
+          echo "Downloading:"
+          echo "$SETUP_URL"
 
           curl -fL \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" \
+            "$SETUP_URL" \
             -o /tmp/ksu-next-setup.sh
 
           test -s /tmp/ksu-next-setup.sh || {
@@ -105,37 +148,49 @@ jobs:
             exit 1
           }
 
-          echo "KernelSU-Next setup script downloaded successfully."
-
           chmod +x /tmp/ksu-next-setup.sh
 
-          /tmp/ksu-next-setup.sh dev
+          /tmp/ksu-next-setup.sh next
+
+          echo "KernelSU-Next installed."
+
+      # ============================================================
+      # SUSFS
+      # ============================================================
 
       - name: Clone SuSFS
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Cloning SuSFS 1.4.2 Android 13 / Kernel 5.15..."
+          echo "=========================================="
+          echo "SuSFS"
+          echo "=========================================="
 
           git clone \
             --depth=1 \
-            --branch 1.4.2-gki-android13-5.15 \
             --single-branch \
+            --branch 1.4.2-gki-android13-5.15 \
             https://gitlab.com/simonpunk/susfs4ksu.git \
             susfs
 
           test -d susfs || {
-            echo "ERROR: SuSFS repository was not cloned."
+            echo "ERROR: SuSFS clone failed."
             exit 1
           }
 
           echo "SuSFS cloned successfully."
 
-      - name: Verify SuSFS Files
+      - name: Verify SuSFS
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Checking required SuSFS files..."
+          echo "Checking SuSFS files..."
 
           test -f susfs/kernel_patches/fs/susfs.c || {
             echo "ERROR: susfs.c not found."
@@ -148,7 +203,7 @@ jobs:
           }
 
           test -f susfs/kernel_patches/5.15/5.15_ksu_susfs.patch || {
-            echo "ERROR: 5.15 SuSFS patch not found."
+            echo "ERROR: 5.15_ksu_susfs.patch not found."
             exit 1
           }
 
@@ -159,11 +214,18 @@ jobs:
 
           echo "All required SuSFS files found."
 
+      # ============================================================
+      # APPLY SUSFS KERNEL PATCH
+      # ============================================================
+
       - name: Apply SuSFS Kernel Patch
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Copying SuSFS kernel files..."
+          echo "Copying SuSFS source..."
 
           cp \
             susfs/kernel_patches/fs/susfs.c \
@@ -178,48 +240,74 @@ jobs:
           patch -p1 \
             < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch
 
+      # ============================================================
+      # APPLY SUSFS KERNELSU PATCH
+      # ============================================================
+
       - name: Apply SuSFS KernelSU-Next Patch
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           if [ ! -d drivers/kernelsu ]; then
-            echo "ERROR: drivers/kernelsu was not created by KernelSU-Next."
+            echo "ERROR: drivers/kernelsu was not found."
+            echo "KernelSU-Next installation failed."
             exit 1
           fi
 
           cd drivers/kernelsu
 
-          echo "Applying SuSFS KernelSU integration patch..."
+          echo "Applying KernelSU SuSFS patch..."
 
           patch -p1 \
             < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
-      - name: Configure Kernel
+          echo "KernelSU SuSFS patch applied."
+
+      # ============================================================
+      # DEFCONFIG
+      # ============================================================
+
+      - name: Configure Defconfig
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          DEFCONFIG_PATH="$(find arch/arm64/configs \
-            -type f \
-            -name "${{ github.event.inputs.DEFCONFIG_NAME }}" \
-            | head -n 1)"
+          DEFCONFIG_PATH="$(
+            find arch/arm64/configs \
+              -type f \
+              -name "${{ inputs.DEFCONFIG_NAME }}" \
+              | head -n 1
+          )"
 
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "ERROR: Defconfig '${{ github.event.inputs.DEFCONFIG_NAME }}' not found."
+            echo "ERROR: Defconfig '${{ inputs.DEFCONFIG_NAME }}' not found."
             exit 1
           fi
 
-          echo "Using defconfig:"
+          echo "Using:"
           echo "$DEFCONFIG_PATH"
 
+          echo
           echo "Kernel name:"
-          echo "${{ github.event.inputs.KERNEL_NAME }}"
+          echo "${{ inputs.KERNEL_NAME }}"
 
           cat >> "$DEFCONFIG_PATH" <<EOF
 
+          # ==========================================================
           # KernelSU-Next
+          # ==========================================================
+
           CONFIG_KSU=y
 
+          # ==========================================================
           # SuSFS
+          # ==========================================================
+
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -232,62 +320,102 @@ jobs:
           CONFIG_KSU_SUSFS_SPOOF_UNAME-RELEASE=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 
-          # Custom kernel name
-          CONFIG_LOCALVERSION="-${{ github.event.inputs.KERNEL_NAME }}"
+          # ==========================================================
+          # Custom Kernel Name
+          # ==========================================================
+
+          CONFIG_LOCALVERSION="-${{ inputs.KERNEL_NAME }}"
           EOF
 
+      # ============================================================
+      # PREPARE CONFIG
+      # ============================================================
+
       - name: Prepare Kernel Configuration
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           make \
             O=out \
             ARCH=arm64 \
-            ${{ github.event.inputs.DEFCONFIG_NAME }}
+            "${{ inputs.DEFCONFIG_NAME }}"
+
+      # ============================================================
+      # BUILD
+      # ============================================================
 
       - name: Build Kernel
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Starting kernel build..."
+          echo "=========================================="
+          echo "Building Kernel"
+          echo "=========================================="
 
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             CC=clang \
             LLVM=1 \
-            LLVM_IAS=1
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+      # ============================================================
+      # VERIFY OUTPUT
+      # ============================================================
 
       - name: Verify Kernel Image
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          echo "Checking kernel output..."
+          echo "=========================================="
+          echo "Kernel Output"
+          echo "=========================================="
 
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "Image found."
-          else
-            echo "ERROR: Kernel Image was not produced."
+          if [ ! -f out/arch/arm64/boot/Image ]; then
+            echo "ERROR: Image was not generated."
             exit 1
           fi
 
+          echo "Image: OK"
+
           if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "Image.gz found."
+            echo "Image.gz: OK"
           fi
 
           echo
           echo "Kernel version:"
+
           make -s \
             O=out \
             ARCH=arm64 \
             kernelversion
 
           echo
-          echo "Configured local version:"
-          grep '^CONFIG_LOCALVERSION=' out/.config || true
+          echo "CONFIG_LOCALVERSION:"
+
+          grep '^CONFIG_LOCALVERSION=' \
+            out/.config || true
+
+      # ============================================================
+      # PACKAGE
+      # ============================================================
 
       - name: Pack Kernel
+        shell: bash
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           rm -rf output
@@ -306,12 +434,16 @@ jobs:
           cd output
 
           zip -9 \
-            "kernel-${{ github.event.inputs.KERNEL_NAME }}.zip" \
+            "kernel-${{ inputs.KERNEL_NAME }}.zip" \
             ./*
+
+      # ============================================================
+      # ARTIFACT
+      # ============================================================
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-${{ github.event.inputs.KERNEL_NAME }}
-          path: kernel_workspace/output/kernel-${{ github.event.inputs.KERNEL_NAME }}.zip
+          name: Kernel-${{ inputs.KERNEL_NAME }}
+          path: kernel_workspace/output/kernel-${{ inputs.KERNEL_NAME }}.zip
           if-no-files-found: error
