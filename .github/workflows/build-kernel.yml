@@ -1,24 +1,32 @@
-name: Build Kernel 5.15 SukiSU-Ultra + SuSFS
+name: Build Kernel 5.15 KernelSU-Next + SuSFS
 
 on:
   workflow_dispatch:
     inputs:
       KERNEL_SOURCE:
-        description: 'Kernel Source Repository (misal: username/repo)'
+        description: 'Kernel Source Repository'
         required: true
         default: 'torvalds/linux'
+
       KERNEL_BRANCH:
         description: 'Kernel Source Branch'
         required: true
         default: 'master'
+
       DEFCONFIG_NAME:
-        description: 'Defconfig File Name (misal: gki_defconfig atau vendor_defconfig)'
+        description: 'Defconfig File Name'
         required: true
         default: 'gki_defconfig'
+
+      KERNEL_NAME:
+        description: 'Custom Kernel Name (e.g. 5.15.209-PureKernel-LunaDevPH)'
+        required: true
+        default: '5.15-PureKernel-LunaDevPH'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@v10
@@ -38,50 +46,74 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev build-essential zip curl git wget libcfitsio-dev
+          sudo apt-get update && \
+          sudo apt-get install -y \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            build-essential \
+            zip \
+            curl \
+            git \
+            wget \
+            libcfitsio-dev
 
       - name: Setup Proton Clang Toolchain
         run: |
-          mkdir -p $GITHUB_WORKSPACE/toolchain
-          cd $GITHUB_WORKSPACE/toolchain
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          mkdir -p "$GITHUB_WORKSPACE/toolchain" && \
+          cd "$GITHUB_WORKSPACE/toolchain" && \
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang.git \
+            clang
 
-      - name: Integrate SukiSU-Ultra & SuSFS
+      - name: Integrate KernelSU-Next + SuSFS
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          # 1. Setup SukiSU-Ultra (rifs28 / KSU-Next)
-          curl -LSs "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          curl -LSs \
+            "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s next
 
-          # 2. Clone SuSFS branch gki-android13-5.15
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 susfs
+          git clone \
+            --depth=1 \
+            -b gki-android13-5.15 \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            susfs
 
-          # 3. Apply Patch SuSFS ke Kernel 5.15
           cp susfs/kernel_patches/fs/susfs.c fs/
           cp susfs/kernel_patches/include/linux/susfs.h include/linux/
-          patch -p1 < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch || true
 
-          # 4. Apply Patch SuSFS ke SukiSU-Ultra
+          patch -p1 \
+            < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch
+
           cd drivers/kernelsu
-          patch -p1 < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+
+          patch -p1 \
+            < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+
           cd ../..
 
-      - name: Configure Defconfig
+      - name: Configure Defconfig + Kernel Name
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
-          
-          DEFCONFIG_PATH=$(find arch/arm64/configs/ -name "${{ github.event.inputs.DEFCONFIG_NAME }}" | head -n 1)
-          
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          DEFCONFIG_PATH="$(find arch/arm64/configs/ \
+            -name "${{ github.event.inputs.DEFCONFIG_NAME }}" \
+            | head -n 1)"
+
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "Defconfig ${{ github.event.inputs.DEFCONFIG_NAME }} tidak ditemukan di arch/arm64/configs/"
+            echo "ERROR: Defconfig not found."
             exit 1
           fi
-          
-          echo "Injecting SuSFS + SukiSU configs into $DEFCONFIG_PATH"
-          cat <<EOF >> $DEFCONFIG_PATH
-          
-          # SukiSU-Ultra & SuSFS Configs
+
+          echo "Using defconfig: $DEFCONFIG_PATH"
+          echo "Kernel name: ${{ github.event.inputs.KERNEL_NAME }}"
+
+          cat >> "$DEFCONFIG_PATH" <<EOF
+
+          # KernelSU-Next + SuSFS
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
@@ -94,36 +126,66 @@ jobs:
           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
           CONFIG_KSU_SUSFS_SPOOF_UNAME-RELEASE=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+
+          CONFIG_LOCALVERSION="-${{ github.event.inputs.KERNEL_NAME }}"
           EOF
 
       - name: Build Kernel
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
           export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
-          
-          make O=out ARCH=arm64 ${{ github.event.inputs.DEFCONFIG_NAME }}
-          make -j$(nproc) O=out ARCH=arm64 \
+
+          make O=out \
+            ARCH=arm64 \
+            ${{ github.event.inputs.DEFCONFIG_NAME }}
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
             CC=clang \
             LLVM=1 \
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+      - name: Show Kernel Version
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+          echo "======================================"
+          echo "Kernel name:"
+          make -s O=out ARCH=arm64 kernelversion
+          echo "Local version:"
+          grep CONFIG_LOCALVERSION out/.config || true
+          echo "======================================"
+
       - name: Pack Kernel Output
         run: |
-          cd $GITHUB_WORKSPACE/kernel_workspace
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
           mkdir -p output
+
           if [ -f out/arch/arm64/boot/Image.gz ]; then
             cp out/arch/arm64/boot/Image.gz output/
           fi
+
           if [ -f out/arch/arm64/boot/Image ]; then
             cp out/arch/arm64/boot/Image output/
           fi
+
+          if [ -z "$(find output -type f -print -quit)" ]; then
+            echo "ERROR: No kernel image was produced."
+            exit 1
+          fi
+
           cd output
-          zip -r kernel-5.15-sukisu-susfs.zip ./*
+
+          zip -r \
+            "kernel-${{ github.event.inputs.KERNEL_NAME }}.zip" \
+            ./*
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-5.15-SukiSU-SuSFS
-          path: kernel_workspace/output/kernel-5.15-sukisu-susfs.zip
+          name: Kernel-${{ github.event.inputs.KERNEL_NAME }}
+          path: kernel_workspace/output/kernel-${{ github.event.inputs.KERNEL_NAME }}.zip
