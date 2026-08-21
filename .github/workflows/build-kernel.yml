@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       KERNEL_SOURCE:
-        description: 'Kernel Source Repository'
+        description: 'Kernel Source Repository (owner/repository)'
         required: true
         default: 'torvalds/linux'
 
       KERNEL_BRANCH:
         description: 'Kernel Source Branch'
         required: true
-        default: 'master'
+        default: 'main'
 
       DEFCONFIG_NAME:
         description: 'Defconfig File Name'
@@ -19,15 +19,16 @@ on:
         default: 'gki_defconfig'
 
       KERNEL_NAME:
-        description: 'Custom Kernel Name (e.g. 5.15.209-PureKernel-LunaDevPH)'
+        description: 'Kernel Name Suffix (example: PureKernel-LunaDevPH)'
         required: true
-        default: '5.15-PureKernel-LunaDevPH'
+        default: '-PureKernel-LunaDevPH'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@v10
         with:
@@ -43,6 +44,7 @@ jobs:
           repository: ${{ github.event.inputs.KERNEL_SOURCE }}
           ref: ${{ github.event.inputs.KERNEL_BRANCH }}
           path: kernel_workspace
+          fetch-depth: 1
 
       - name: Install Build Dependencies
         run: |
@@ -58,63 +60,166 @@ jobs:
             curl \
             git \
             wget \
-            libcfitsio-dev
+            clang \
+            llvm \
+            lld
 
-      - name: Setup Proton Clang Toolchain
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/toolchain" && \
-          cd "$GITHUB_WORKSPACE/toolchain" && \
-          git clone --depth=1 \
-            https://github.com/kdrag0n/proton-clang.git \
-            clang
-
-      - name: Integrate KernelSU-Next + SuSFS
+      - name: Check Kernel Source
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          curl -LSs \
-            "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" \
-            | bash -s next
+          echo "Kernel source:"
+          git remote -v
+
+          echo
+          echo "Kernel branch:"
+          git branch --show-current
+
+          echo
+          echo "Checking kernel tree..."
+
+          test -d drivers || {
+            echo "ERROR: drivers/ directory not found."
+            exit 1
+          }
+
+          test -d arch/arm64 || {
+            echo "ERROR: arch/arm64/ directory not found."
+            exit 1
+          }
+
+          echo "Kernel source looks valid."
+
+      - name: Integrate KernelSU-Next
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Downloading KernelSU-Next setup script..."
+
+          curl -fL \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" \
+            -o /tmp/ksu-next-setup.sh
+
+          test -s /tmp/ksu-next-setup.sh || {
+            echo "ERROR: KernelSU-Next setup script is empty."
+            exit 1
+          }
+
+          echo "KernelSU-Next setup script downloaded successfully."
+
+          chmod +x /tmp/ksu-next-setup.sh
+
+          /tmp/ksu-next-setup.sh dev
+
+      - name: Clone SuSFS
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Cloning SuSFS 1.4.2 Android 13 / Kernel 5.15..."
 
           git clone \
             --depth=1 \
-            -b gki-android13-5.15 \
+            --branch 1.4.2-gki-android13-5.15 \
+            --single-branch \
             https://gitlab.com/simonpunk/susfs4ksu.git \
             susfs
 
-          cp susfs/kernel_patches/fs/susfs.c fs/
-          cp susfs/kernel_patches/include/linux/susfs.h include/linux/
+          test -d susfs || {
+            echo "ERROR: SuSFS repository was not cloned."
+            exit 1
+          }
+
+          echo "SuSFS cloned successfully."
+
+      - name: Verify SuSFS Files
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Checking required SuSFS files..."
+
+          test -f susfs/kernel_patches/fs/susfs.c || {
+            echo "ERROR: susfs.c not found."
+            exit 1
+          }
+
+          test -f susfs/kernel_patches/include/linux/susfs.h || {
+            echo "ERROR: susfs.h not found."
+            exit 1
+          }
+
+          test -f susfs/kernel_patches/5.15/5.15_ksu_susfs.patch || {
+            echo "ERROR: 5.15 SuSFS patch not found."
+            exit 1
+          }
+
+          test -f susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || {
+            echo "ERROR: KernelSU SuSFS patch not found."
+            exit 1
+          }
+
+          echo "All required SuSFS files found."
+
+      - name: Apply SuSFS Kernel Patch
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "Copying SuSFS kernel files..."
+
+          cp \
+            susfs/kernel_patches/fs/susfs.c \
+            fs/susfs.c
+
+          cp \
+            susfs/kernel_patches/include/linux/susfs.h \
+            include/linux/susfs.h
+
+          echo "Applying Linux 5.15 SuSFS patch..."
 
           patch -p1 \
             < susfs/kernel_patches/5.15/5.15_ksu_susfs.patch
 
+      - name: Apply SuSFS KernelSU-Next Patch
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          if [ ! -d drivers/kernelsu ]; then
+            echo "ERROR: drivers/kernelsu was not created by KernelSU-Next."
+            exit 1
+          fi
+
           cd drivers/kernelsu
+
+          echo "Applying SuSFS KernelSU integration patch..."
 
           patch -p1 \
             < ../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
 
-          cd ../..
-
-      - name: Configure Defconfig + Kernel Name
+      - name: Configure Kernel
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          DEFCONFIG_PATH="$(find arch/arm64/configs/ \
+          DEFCONFIG_PATH="$(find arch/arm64/configs \
+            -type f \
             -name "${{ github.event.inputs.DEFCONFIG_NAME }}" \
             | head -n 1)"
 
           if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "ERROR: Defconfig not found."
+            echo "ERROR: Defconfig '${{ github.event.inputs.DEFCONFIG_NAME }}' not found."
             exit 1
           fi
 
-          echo "Using defconfig: $DEFCONFIG_PATH"
-          echo "Kernel name: ${{ github.event.inputs.KERNEL_NAME }}"
+          echo "Using defconfig:"
+          echo "$DEFCONFIG_PATH"
+
+          echo "Kernel name:"
+          echo "${{ github.event.inputs.KERNEL_NAME }}"
 
           cat >> "$DEFCONFIG_PATH" <<EOF
 
-          # KernelSU-Next + SuSFS
+          # KernelSU-Next
           CONFIG_KSU=y
+
+          # SuSFS
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
@@ -127,60 +232,80 @@ jobs:
           CONFIG_KSU_SUSFS_SPOOF_UNAME-RELEASE=y
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
 
+          # Custom kernel name
           CONFIG_LOCALVERSION="-${{ github.event.inputs.KERNEL_NAME }}"
           EOF
+
+      - name: Prepare Kernel Configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            ${{ github.event.inputs.DEFCONFIG_NAME }}
 
       - name: Build Kernel
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          export PATH="$GITHUB_WORKSPACE/toolchain/clang/bin:$PATH"
-
-          make O=out \
-            ARCH=arm64 \
-            ${{ github.event.inputs.DEFCONFIG_NAME }}
+          echo "Starting kernel build..."
 
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             CC=clang \
             LLVM=1 \
-            LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM_IAS=1
 
-      - name: Show Kernel Version
-        run: |
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          echo "======================================"
-          echo "Kernel name:"
-          make -s O=out ARCH=arm64 kernelversion
-          echo "Local version:"
-          grep CONFIG_LOCALVERSION out/.config || true
-          echo "======================================"
-
-      - name: Pack Kernel Output
+      - name: Verify Kernel Image
         run: |
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          mkdir -p output
-
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp out/arch/arm64/boot/Image.gz output/
-          fi
+          echo "Checking kernel output..."
 
           if [ -f out/arch/arm64/boot/Image ]; then
-            cp out/arch/arm64/boot/Image output/
+            echo "Image found."
+          else
+            echo "ERROR: Kernel Image was not produced."
+            exit 1
           fi
 
-          if [ -z "$(find output -type f -print -quit)" ]; then
-            echo "ERROR: No kernel image was produced."
-            exit 1
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            echo "Image.gz found."
+          fi
+
+          echo
+          echo "Kernel version:"
+          make -s \
+            O=out \
+            ARCH=arm64 \
+            kernelversion
+
+          echo
+          echo "Configured local version:"
+          grep '^CONFIG_LOCALVERSION=' out/.config || true
+
+      - name: Pack Kernel
+        run: |
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          rm -rf output
+          mkdir -p output
+
+          cp \
+            out/arch/arm64/boot/Image \
+            output/Image
+
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp \
+              out/arch/arm64/boot/Image.gz \
+              output/Image.gz
           fi
 
           cd output
 
-          zip -r \
+          zip -9 \
             "kernel-${{ github.event.inputs.KERNEL_NAME }}.zip" \
             ./*
 
@@ -189,3 +314,4 @@ jobs:
         with:
           name: Kernel-${{ github.event.inputs.KERNEL_NAME }}
           path: kernel_workspace/output/kernel-${{ github.event.inputs.KERNEL_NAME }}.zip
+          if-no-files-found: error
