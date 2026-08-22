@@ -452,11 +452,88 @@ jobs:
 
           cd common
 
+          python3 - <<'PYEOF'
+          from pathlib import Path
+
+          ns = Path("fs/namespace.c")
+          s = ns.read_text()
+
+          anchor = "#include <linux/mnt_idmapping.h>\n"
+          block = (
+              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+              "#include <linux/susfs_def.h>\n"
+              "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+          )
+          assert s.count(anchor) == 1, "namespace.c mnt_idmapping anchor not unique"
+          s = s.replace(anchor, anchor + block)
+
+          anchor = "#include <trace/hooks/blk.h>\n"
+          block = (
+              "\n"
+              "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+              "extern bool susfs_is_current_ksu_domain(void);\n"
+              "extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n"
+              "\n"
+              "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
+              "\n"
+              "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+          )
+          assert s.count(anchor) == 1, "namespace.c blk.h anchor not unique"
+          s = s.replace(anchor, block)
+          ns.write_text(s)
+
+          tm = Path("fs/proc/task_mmu.c")
+          s = tm.read_text()
+
+          anchor = "#include <linux/pkeys.h>\n"
+          block = (
+              "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n"
+              "#include <linux/susfs_def.h>\n"
+              "#endif // #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n"
+          )
+          assert s.count(anchor) == 1, "task_mmu.c pkeys.h anchor not unique"
+          s = s.replace(anchor, anchor + block)
+          tm.write_text(s)
+
+          print("Pre-applied upstream-shifted SUSFS hunks.")
+          PYEOF
+
           patch \
             --forward \
             --batch \
             -p1 \
-            < "../$PATCH"
+            < "../$PATCH" \
+            || echo "WARNING: SUSFS patch reported rejected hunks (pre-applied upstream-shifted hunks are expected)."
+
+          REJECTS="$(find .. -name '*.rej' | sort)"
+          EXPECTED="../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej"
+
+          for REJECT in $REJECTS; do
+
+            KEEP=0
+
+            for EXP in $EXPECTED; do
+              if [ "$REJECT" = "$EXP" ]; then
+                KEEP=1
+              fi
+            done
+
+            if [ "$KEEP" != "1" ]; then
+              echo "ERROR: unexpected SUSFS patch reject: $REJECT"
+              exit 1
+            fi
+
+          done
+
+          rm -f ../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej
+
+          grep -q "susfs_is_current_ksu_domain" fs/namespace.c
+          grep -q "susfs_def.h" fs/namespace.c
+          grep -q "susfs_def.h" fs/proc/task_mmu.c
+          grep -qs "susfs" fs/exec.c
+          grep -qs "susfs" fs/namei.c
+
+          echo "SUSFS patch verified."
 
           KSU_PATCH="../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
