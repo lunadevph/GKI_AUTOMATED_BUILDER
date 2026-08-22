@@ -508,7 +508,7 @@ jobs:
               "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
           )
           assert s.count(anchor) == 1, "namespace.c blk.h anchor not unique"
-          s = s.replace(anchor, block)
+          s = s.replace(anchor, anchor + block)
           ns.write_text(s)
 
           tm = Path("fs/proc/task_mmu.c")
