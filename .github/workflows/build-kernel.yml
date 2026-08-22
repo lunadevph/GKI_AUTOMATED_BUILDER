@@ -676,7 +676,6 @@ jobs:
             wild-patches
 
           for WK_PATCH in \
-            "wild-patches/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch" \
             "wild-patches/common/droidspaces/0001-Guard-USER_NS-for-non-root-users.patch"
           do
 
