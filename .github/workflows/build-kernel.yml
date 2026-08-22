@@ -452,11 +452,40 @@ jobs:
 
           cd common
 
+          patch \
+            --forward \
+            --batch \
+            -p1 \
+            < "../$PATCH" \
+            || echo "WARNING: SUSFS patch reported rejected hunks."
+
+          REJECTS="$(find .. -name '*.rej' | sort)"
+          EXPECTED="../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej"
+
+          for REJECT in $REJECTS; do
+
+            KEEP=0
+
+            for EXP in $EXPECTED; do
+              if [ "$REJECT" = "$EXP" ]; then
+                KEEP=1
+              fi
+            done
+
+            if [ "$KEEP" != "1" ]; then
+              echo "ERROR: unexpected SUSFS patch reject: $REJECT"
+              exit 1
+            fi
+
+          done
+
           python3 - <<'PYEOF'
           from pathlib import Path
 
           ns = Path("fs/namespace.c")
           s = ns.read_text()
+
+          assert "#include <linux/susfs_def.h>" not in s, "namespace.c susfs include already present"
 
           anchor = "#include <linux/mnt_idmapping.h>\n"
           block = (
@@ -485,6 +514,8 @@ jobs:
           tm = Path("fs/proc/task_mmu.c")
           s = tm.read_text()
 
+          assert "susfs_def.h" not in s.split("\n\n#include <asm/elf.h>")[0], "task_mmu.c susfs include already present"
+
           anchor = "#include <linux/pkeys.h>\n"
           block = (
               "#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n"
@@ -495,41 +526,17 @@ jobs:
           s = s.replace(anchor, anchor + block)
           tm.write_text(s)
 
-          print("Pre-applied upstream-shifted SUSFS hunks.")
+          print("Applied upstream-shifted SUSFS hunks.")
           PYEOF
-
-          patch \
-            --forward \
-            --batch \
-            -p1 \
-            < "../$PATCH" \
-            || echo "WARNING: SUSFS patch reported rejected hunks (pre-applied upstream-shifted hunks are expected)."
-
-          REJECTS="$(find .. -name '*.rej' | sort)"
-          EXPECTED="../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej"
-
-          for REJECT in $REJECTS; do
-
-            KEEP=0
-
-            for EXP in $EXPECTED; do
-              if [ "$REJECT" = "$EXP" ]; then
-                KEEP=1
-              fi
-            done
-
-            if [ "$KEEP" != "1" ]; then
-              echo "ERROR: unexpected SUSFS patch reject: $REJECT"
-              exit 1
-            fi
-
-          done
 
           rm -f ../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej
 
           grep -q "susfs_is_current_ksu_domain" fs/namespace.c
+          grep -q "CL_COPY_MNT_NS" fs/namespace.c
+          grep -q "VFSMOUNT_MNT_FLAGS_KSU_UNSHARED_MNT" fs/namespace.c
           grep -q "susfs_def.h" fs/namespace.c
           grep -q "susfs_def.h" fs/proc/task_mmu.c
+          grep -q "susfs_sus_kstat_spoof_show_map_vma" fs/proc/task_mmu.c
           grep -qs "susfs" fs/exec.c
           grep -qs "susfs" fs/namei.c
 
