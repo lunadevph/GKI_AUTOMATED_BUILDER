@@ -851,6 +851,48 @@ jobs:
 
           fi
 
+          scripts/config \
+            --file "$OUT/.config" \
+            --disable CONFIG_LTO_NONE
+
+          scripts/config \
+            --file "$OUT/.config" \
+            --enable CONFIG_LTO
+
+          scripts/config \
+            --file "$OUT/.config" \
+            --enable CONFIG_LTO_CLANG_THIN
+
+          scripts/config \
+            --file "$OUT/.config" \
+            --enable CONFIG_CFI_CLANG
+
+          scripts/config \
+            --file "$OUT/.config" \
+            --enable CONFIG_CFI_CLANG_SHADOW
+
+          scripts/config \
+            --file "$OUT/.config" \
+            --enable CONFIG_SHADOW_CALL_STACK
+
+          for KMI_CFG in \
+            CONFIG_SYSVIPC \
+            CONFIG_POSIX_MQUEUE \
+            CONFIG_IPC_NS \
+            CONFIG_PID_NS \
+            CONFIG_USER_NS \
+            CONFIG_DEVTMPFS \
+            CONFIG_TMPFS_XATTR \
+            CONFIG_TMPFS_POSIX_ACL
+          do
+
+            if grep -q "^${KMI_CFG}=y" "$OUT/.config"; then
+              echo "WARNING: ${KMI_CFG}=y diverges from stock GKI KMI."
+              echo "Vendor modules may fail version checks and the kernel may not boot."
+            fi
+
+          done
+
           if [ "${{ inputs.ENABLE_BTF }}" = "true" ]; then
 
             scripts/config \
@@ -876,7 +918,7 @@ jobs:
           echo "=========================================="
 
           grep -E \
-            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_BBG=|CONFIG_LSM=|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_USER_NS=|CONFIG_DEBUG_INFO_BTF=' \
+            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_BBG=|CONFIG_LSM=|CONFIG_LTO|CONFIG_CFI_CLANG=|CONFIG_SHADOW_CALL_STACK=|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_USER_NS=|CONFIG_DEBUG_INFO_BTF=' \
             "$OUT/.config" \
             || true
 
