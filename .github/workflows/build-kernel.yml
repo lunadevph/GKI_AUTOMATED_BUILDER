@@ -486,35 +486,34 @@ jobs:
           echo "SETTING UP BASEBAND GUARD"
           echo "=========================================="
 
-          rm -rf baseband-guard
+          rm -rf Baseband-guard
 
           git clone \
             --depth=1 \
-            https://github.com/WildKernels/baseband-guard.git \
-            baseband-guard
+            https://github.com/vc-teahouse/Baseband-guard.git \
+            Baseband-guard
 
           echo "Baseband Guard repository cloned."
 
           find \
-            baseband-guard \
+            Baseband-guard \
             -maxdepth 3 \
             -type f \
             ! -path '*/.git/*' \
             | sort \
             | head -200
 
-          if [ -f baseband-guard/setup.sh ]; then
+          test -f Baseband-guard/setup.sh
 
-            cd common
+          bash Baseband-guard/setup.sh
 
-            bash ../baseband-guard/setup.sh
+          grep -q "baseband-guard" common/security/Makefile
 
-          else
+          grep -q "security/baseband-guard/Kconfig" common/security/Kconfig
 
-            echo "WARNING: Baseband Guard setup.sh not found."
-            echo "No automatic BBG integration was performed."
+          test -L common/security/baseband-guard
 
-          fi
+          echo "Baseband Guard integration verified."
 
       # ============================================================
       # DROIDSPACES
@@ -734,6 +733,36 @@ jobs:
 
           done
 
+          if [ "${{ inputs.ENABLE_BBG }}" = "true" ] || \
+             [[ "${{ inputs.FEATURE_SET }}" == *"BBG"* ]] || \
+             [ "${{ inputs.FEATURE_SET }}" = "FULL" ]; then
+
+            scripts/config \
+              --file "$OUT/.config" \
+              --enable CONFIG_SECURITY
+
+            scripts/config \
+              --file "$OUT/.config" \
+              --enable CONFIG_BBG
+
+            CURRENT_LSM="$(grep -oP '(?<=^CONFIG_LSM=")[^"]+' "$OUT/.config" || true)"
+
+            if [ -n "$CURRENT_LSM" ] && [[ "$CURRENT_LSM" != *baseband_guard* ]]; then
+
+              scripts/config \
+                --file "$OUT/.config" \
+                --set-str CONFIG_LSM "${CURRENT_LSM},baseband_guard"
+
+            elif [ -z "$CURRENT_LSM" ]; then
+
+              scripts/config \
+                --file "$OUT/.config" \
+                --set-str CONFIG_LSM "baseband_guard"
+
+            fi
+
+          fi
+
           if [ "${{ inputs.ENABLE_BTF }}" = "true" ]; then
 
             scripts/config \
@@ -759,7 +788,7 @@ jobs:
           echo "=========================================="
 
           grep -E \
-            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_USER_NS=|CONFIG_DEBUG_INFO_BTF=' \
+            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_BBG=|CONFIG_LSM=|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_USER_NS=|CONFIG_DEBUG_INFO_BTF=' \
             "$OUT/.config" \
             || true
 
