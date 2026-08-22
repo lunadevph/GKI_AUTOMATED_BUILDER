@@ -459,8 +459,8 @@ jobs:
             < "../$PATCH" \
             || echo "WARNING: SUSFS patch reported rejected hunks."
 
-          REJECTS="$(find .. -name '*.rej' | sort)"
-          EXPECTED="../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej"
+          REJECTS="$(find . -name '*.rej' | sort)"
+          EXPECTED="./fs/namespace.c.rej ./fs/proc/task_mmu.c.rej"
 
           for REJECT in $REJECTS; do
 
@@ -529,7 +529,7 @@ jobs:
           print("Applied upstream-shifted SUSFS hunks.")
           PYEOF
 
-          rm -f ../fs/namespace.c.rej ../fs/proc/task_mmu.c.rej
+          rm -f fs/namespace.c.rej fs/proc/task_mmu.c.rej
 
           grep -q "susfs_is_current_ksu_domain" fs/namespace.c
           grep -q "CL_COPY_MNT_NS" fs/namespace.c
