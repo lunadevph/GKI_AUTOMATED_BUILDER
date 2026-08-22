@@ -668,6 +668,32 @@ jobs:
 
           echo "DroidSpaces patch applied."
 
+          rm -rf wild-patches
+
+          git clone \
+            --depth=1 \
+            https://github.com/WildKernels/kernel_patches.git \
+            wild-patches
+
+          for WK_PATCH in \
+            "wild-patches/common/droidspaces/fix_abi_padding_for_posix_mqueue.patch" \
+            "wild-patches/common/droidspaces/0001-Guard-USER_NS-for-non-root-users.patch"
+          do
+
+            echo
+            echo "Applying WildKernels KABI patch: $WK_PATCH"
+
+            patch \
+              -d common \
+              --forward \
+              --batch \
+              -p1 \
+              < "$WK_PATCH"
+
+          done
+
+          echo "WildKernels DroidSpaces KABI patches applied."
+
       # ============================================================
       # DROIDSPACES CONFIG
       # ============================================================
