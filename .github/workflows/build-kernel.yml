@@ -19,7 +19,7 @@ on:
         default: "gki_defconfig"
 
       KERNEL_NAME:
-        description: "Kernel LOCALVERSION"
+        description: "Kernel LOCALVERSION / kernel name"
         required: true
         default: "LunaGKI"
 
@@ -33,11 +33,16 @@ on:
           - "KSU"
           - "SUSFS"
           - "KSU,SUSFS"
+          - "KSU,BBG"
           - "KSU,DROIDSPACES"
           - "KSU,NET"
+          - "KSU,SUSFS,BBG"
           - "KSU,SUSFS,DROIDSPACES"
           - "KSU,SUSFS,NET"
-          - "KSU,DROIDSPACES,NET"
+          - "KSU,SUSFS,BBG,DROIDSPACES"
+          - "KSU,SUSFS,BBG,NET"
+          - "KSU,SUSFS,DROIDSPACES,NET"
+          - "KSU,BBG,DROIDSPACES,NET"
           - "FULL"
 
       KSU_BRANCH:
@@ -46,7 +51,7 @@ on:
         default: "next"
 
       SUSFS_BRANCH:
-        description: "SUSFS branch"
+        description: "SUSFS branch/tag"
         required: true
         default: "gki-android13-5.15"
 
@@ -61,6 +66,12 @@ on:
         required: true
         type: boolean
         default: true
+
+      ENABLE_BBG:
+        description: "Enable Baseband Guard"
+        required: true
+        type: boolean
+        default: false
 
       ENABLE_DROIDSPACES:
         description: "Enable DroidSpaces"
@@ -86,14 +97,18 @@ on:
         type: boolean
         default: true
 
+      SKIP_DISK_CLEANUP:
+        description: "Skip disk cleanup"
+        required: true
+        type: boolean
+        default: false
+
       BUILD_JOBS:
         description: "Build jobs, 0 = automatic"
         required: true
         default: "0"
 
-
 jobs:
-
   build:
 
     name: "${{ inputs.KERNEL_NAME }} - Android 13 GKI 5.15"
@@ -113,12 +128,12 @@ jobs:
         with:
           fetch-depth: 1
 
-
       # ============================================================
-      # AGGRESSIVE DISK CLEANUP
+      # DISK CLEANUP
       # ============================================================
 
       - name: Free Disk Space
+        if: ${{ !inputs.SKIP_DISK_CLEANUP }}
         shell: bash
         run: |
           set -euo pipefail
@@ -134,21 +149,14 @@ jobs:
             /usr/local/.ghcup \
             /usr/share/dotnet \
             /opt/ghc \
-            /usr/local/julia* \
+            /usr/local/julia \
             /usr/local/aws-cli \
             /usr/local/aws-sam-cli \
             /usr/share/swift \
             /usr/local/share/powershell \
-            /usr/local/lib/node_modules \
             /usr/share/gradle \
             /usr/share/miniconda \
             /opt/hostedtoolcache/CodeQL \
-            /opt/hostedtoolcache/node \
-            /opt/hostedtoolcache/Java \
-            /opt/hostedtoolcache/Python \
-            /opt/hostedtoolcache/go \
-            /opt/hostedtoolcache/Ruby \
-            /opt/hostedtoolcache/Rust \
             2>/dev/null || true
 
           sudo apt-get clean || true
@@ -160,94 +168,46 @@ jobs:
             /var/tmp/* \
             2>/dev/null || true
 
-          docker system prune \
-            --all \
-            --force \
-            --volumes \
-            2>/dev/null || true
+          docker system prune -af || true
 
           echo
-
           echo "=========================================="
           echo "DISK AFTER CLEANUP"
           echo "=========================================="
 
           df -h
 
-
-      # ============================================================
-      # CREATE SWAP
-      # ============================================================
-
-      - name: Create Build Swap
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "SETTING UP SWAP"
-          echo "=========================================="
-
-          sudo swapoff /swapfile 2>/dev/null || true
-
-          sudo rm -f /swapfile
-
-          sudo fallocate -l 8G /swapfile || \
-            sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
-
-          sudo chmod 600 /swapfile
-
-          sudo mkswap /swapfile
-
-          sudo swapon /swapfile
-
+          echo
           free -h
 
-          swapon --show
-
-
-      # ============================================================
-      # DISK CHECK
-      # ============================================================
-
-      - name: Check Build Resources
+      - name: Check Available Disk Space
         shell: bash
         run: |
           set -euo pipefail
 
           echo "=========================================="
-          echo "DISK"
+          echo "DISK STATUS"
           echo "=========================================="
 
           df -h
-
-          echo
-
-          echo "=========================================="
-          echo "INODES"
-          echo "=========================================="
-
           df -ih
 
           echo
-
-          echo "=========================================="
-          echo "MEMORY"
-          echo "=========================================="
-
+          echo "Memory:"
           free -h
 
           echo
+          echo "Skip disk cleanup: ${{ inputs.SKIP_DISK_CLEANUP }}"
 
           AVAILABLE_KB="$(df --output=avail "$GITHUB_WORKSPACE" | tail -1)"
 
-          if [ "$AVAILABLE_KB" -lt 15728640 ]; then
-            echo "WARNING: Less than 15 GiB free."
+          if [ "$AVAILABLE_KB" -lt 10485760 ]; then
+            echo "ERROR: Less than 10 GiB available."
+            exit 1
           fi
 
-
       # ============================================================
-      # INSTALL GOOGLE REPO
+      # GOOGLE REPO
       # ============================================================
 
       - name: Install Google Repo
@@ -257,10 +217,7 @@ jobs:
 
           mkdir -p "$HOME/bin"
 
-          curl \
-            -fL \
-            --retry 5 \
-            --retry-delay 2 \
+          curl -fL \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
 
@@ -269,7 +226,6 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
           "$HOME/bin/repo" --version
-
 
       # ============================================================
       # DEPENDENCIES
@@ -282,9 +238,7 @@ jobs:
 
           sudo apt-get update
 
-          sudo apt-get install \
-            -y \
-            --no-install-recommends \
+          sudo apt-get install -y \
             bc \
             bison \
             flex \
@@ -300,6 +254,7 @@ jobs:
             git \
             ccache \
             python3 \
+            python3-pip \
             rsync \
             dwarves \
             lz4 \
@@ -312,7 +267,6 @@ jobs:
 
           sudo rm -rf /var/lib/apt/lists/*
 
-
       # ============================================================
       # CCACHE
       # ============================================================
@@ -322,9 +276,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: gki-android13-5.15-${{ inputs.KERNEL_BRANCH }}-ccache
+          key: gki-android13-5.15-${{ inputs.KERNEL_BRANCH }}-proton-${{ github.run_id }}
           restore-keys: |
-            gki-android13-5.15-${{ inputs.KERNEL_BRANCH }}-
+            gki-android13-5.15-${{ inputs.KERNEL_BRANCH }}-proton-
             gki-android13-5.15-
 
       - name: Configure ccache
@@ -335,25 +289,19 @@ jobs:
 
           mkdir -p "$HOME/.ccache"
 
-          ccache \
-            --set-config=cache_dir="$HOME/.ccache"
-
-          ccache \
-            --set-config=max_size=6G
-
-          ccache \
-            --set-config=compression=true
-
-          ccache \
-            --set-config=compression_level=3
+          ccache --set-config=cache_dir="$HOME/.ccache"
+          ccache --set-config=max_size=10G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=5
 
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
-          ccache --zero-stats
+          ccache -z
 
+          ccache -p
 
       # ============================================================
-      # GOOGLE GKI INIT
+      # GOOGLE GKI
       # ============================================================
 
       - name: Initialize Google GKI
@@ -374,11 +322,6 @@ jobs:
             --no-clone-bundle \
             --no-tags
 
-
-      # ============================================================
-      # GOOGLE GKI SYNC
-      # ============================================================
-
       - name: Sync Google GKI
         working-directory: gki
         shell: bash
@@ -387,13 +330,12 @@ jobs:
 
           repo sync \
             -c \
-            -j4 \
+            -j"$(nproc)" \
             --no-tags \
             --optimized-fetch \
             --prune
 
           repo status
-
 
       # ============================================================
       # VERIFY GKI
@@ -406,17 +348,43 @@ jobs:
           set -euo pipefail
 
           test -d arch/arm64
-
           test -d arch/arm64/configs
-
-          test -f \
-            "arch/arm64/configs/${{ inputs.DEFCONFIG_NAME }}"
+          test -f "arch/arm64/configs/${{ inputs.DEFCONFIG_NAME }}"
 
           echo "GKI source verified."
 
+          echo "GKI_ROOT=$GITHUB_WORKSPACE/gki" >> "$GITHUB_ENV"
+          echo "KERNEL_ROOT=$GITHUB_WORKSPACE/gki/common" >> "$GITHUB_ENV"
+          echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
 
       # ============================================================
-      # KERNELSU NEXT
+      # PROTON GCC
+      # ============================================================
+
+      - name: Setup Proton GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+
+          rm -rf proton-clang
+
+          git clone \
+            --depth=1 \
+            https://github.com/kdrag0n/proton-clang.git \
+            proton-clang
+
+          test -x proton-clang/bin/clang
+
+          echo "PROTON_CLANG=$GITHUB_WORKSPACE/proton-clang" >> "$GITHUB_ENV"
+
+          export PATH="$GITHUB_WORKSPACE/proton-clang/bin:$PATH"
+
+          clang --version
+
+      # ============================================================
+      # KERNELSU-NEXT
       # ============================================================
 
       - name: Setup KernelSU-Next
@@ -427,19 +395,16 @@ jobs:
           set -euo pipefail
 
           echo "=========================================="
-          echo "INSTALLING KERNELSU-NEXT"
+          echo "SETTING UP KERNELSU-NEXT"
           echo "=========================================="
 
-          curl \
-            -fLSs \
-            --retry 5 \
+          curl -fLSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ inputs.KSU_BRANCH }}/kernel/setup.sh" \
             | bash -s "${{ inputs.KSU_BRANCH }}"
 
           test -d drivers/kernelsu
 
           echo "KernelSU-Next installed."
-
 
       # ============================================================
       # SUSFS
@@ -464,44 +429,26 @@ jobs:
             https://gitlab.com/simonpunk/susfs4ksu.git \
             susfs
 
-          PATCH=""
+          PATCH="susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
 
-          for CANDIDATE in \
-            susfs/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch \
-            susfs/kernel_patches/50_add_susfs_in_kernel-5.15.patch \
-            susfs/kernel_patches/50_add_susfs_in_kernel-5.15-gki.patch
-          do
-            if [ -f "$CANDIDATE" ]; then
-              PATCH="$CANDIDATE"
-              break
-            fi
-          done
+          if [ ! -f "$PATCH" ]; then
+            echo "ERROR: SUSFS patch not found:"
+            echo "$PATCH"
 
-          if [ -z "$PATCH" ]; then
-            echo "ERROR: SUSFS patch not found."
-
-            find \
-              susfs/kernel_patches \
+            find susfs/kernel_patches \
               -type f \
               | sort
 
             exit 1
           fi
 
-          echo "Using patch:"
-          echo "$PATCH"
+          cp \
+            susfs/kernel_patches/fs/* \
+            common/fs/
 
-          if [ -d susfs/kernel_patches/fs ]; then
-            cp -a \
-              susfs/kernel_patches/fs/. \
-              common/fs/
-          fi
-
-          if [ -d susfs/kernel_patches/include/linux ]; then
-            cp -a \
-              susfs/kernel_patches/include/linux/. \
-              common/include/linux/
-          fi
+          cp \
+            susfs/kernel_patches/include/linux/* \
+            common/include/linux/
 
           cd common
 
@@ -513,19 +460,61 @@ jobs:
 
           KSU_PATCH="../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
-          if [ -f "$KSU_PATCH" ]; then
+          if [ -f "$KSU_PATCH" ] && [ -d drivers/kernelsu ]; then
 
             patch \
               --forward \
               --batch \
               -p1 \
               < "$KSU_PATCH" \
-              || true
+              || echo "WARNING: KernelSU SUSFS patch already applied or partially incompatible."
 
           fi
 
-          echo "SUSFS setup completed."
+      # ============================================================
+      # BASEBAND GUARD
+      # ============================================================
 
+      - name: Setup Baseband Guard
+        if: inputs.ENABLE_BBG || contains(inputs.FEATURE_SET, 'BBG') || inputs.FEATURE_SET == 'FULL'
+        working-directory: gki
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "SETTING UP BASEBAND GUARD"
+          echo "=========================================="
+
+          rm -rf baseband-guard
+
+          git clone \
+            --depth=1 \
+            https://github.com/WildKernels/baseband-guard.git \
+            baseband-guard
+
+          echo "Baseband Guard repository cloned."
+
+          find \
+            baseband-guard \
+            -maxdepth 3 \
+            -type f \
+            ! -path '*/.git/*' \
+            | sort \
+            | head -200
+
+          if [ -f baseband-guard/setup.sh ]; then
+
+            cd common
+
+            bash ../baseband-guard/setup.sh
+
+          else
+
+            echo "WARNING: Baseband Guard setup.sh not found."
+            echo "No automatic BBG integration was performed."
+
+          fi
 
       # ============================================================
       # DROIDSPACES
@@ -549,36 +538,52 @@ jobs:
             https://github.com/ravindu644/Droidspaces-OSS.git \
             Droidspaces-OSS
 
-          DS_PATCH="$(
+          DS_PATCH="Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
+
+          if [ ! -f "$DS_PATCH" ]; then
+
+            echo "ERROR: Required DroidSpaces GKI below-6.12 patch not found."
+
             find \
-              Droidspaces-OSS/Documentation/resources/kernel-patches \
+              Droidspaces-OSS/Documentation/resources/kernel-patches/GKI \
               -type f \
-              -iname '*.patch' \
-              | grep -Ei \
-                '(gki|kabi|sysvipc)' \
-              | head -n1 \
-              || true
-          )"
+              | sort
 
-          if [ -n "$DS_PATCH" ]; then
-
-            echo "Applying:"
-            echo "$DS_PATCH"
-
-            cd common
-
-            patch \
-              --forward \
-              --batch \
-              -p1 \
-              < "../$DS_PATCH"
-
-          else
-
-            echo "WARNING: No DroidSpaces patch found."
+            exit 1
 
           fi
 
+          echo "Using DroidSpaces patch:"
+          echo "$DS_PATCH"
+
+          echo
+          echo "Dry-run patch test..."
+
+          if ! patch \
+            -d common \
+            --dry-run \
+            -p1 \
+            < "$DS_PATCH"
+          then
+
+            echo "ERROR: DroidSpaces below-6.12 patch does not apply cleanly."
+            echo "Refusing to use a 6.12+ patch on the 5.15 kernel."
+
+            exit 1
+
+          fi
+
+          echo
+          echo "Applying patch..."
+
+          patch \
+            -d common \
+            --forward \
+            --batch \
+            -p1 \
+            < "$DS_PATCH"
+
+          echo "DroidSpaces patch applied."
 
       # ============================================================
       # DROIDSPACES CONFIG
@@ -588,26 +593,29 @@ jobs:
         if: inputs.ENABLE_DROIDSPACES || contains(inputs.FEATURE_SET, 'DROIDSPACES') || inputs.FEATURE_SET == 'FULL'
         shell: bash
         run: |
+          set -euo pipefail
+
           cat > "$GITHUB_WORKSPACE/droidspaces.config" <<'EOF'
-          CONFIG_PID_NS=y
           CONFIG_SYSVIPC=y
           CONFIG_POSIX_MQUEUE=y
           CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
           CONFIG_DEVTMPFS=y
-          CONFIG_BINFMT_MISC=y
-          CONFIG_BINFMT_SCRIPT=y
           CONFIG_USER_NS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
           EOF
 
-
       # ============================================================
-      # NETWORK CONFIG
+      # NETWORKING
       # ============================================================
 
       - name: Create Networking Config
         if: inputs.ENABLE_NETWORKING || contains(inputs.FEATURE_SET, 'NET') || inputs.FEATURE_SET == 'FULL'
         shell: bash
         run: |
+          set -euo pipefail
+
           cat > "$GITHUB_WORKSPACE/networking.config" <<'EOF'
           CONFIG_NET=y
           CONFIG_INET=y
@@ -620,9 +628,8 @@ jobs:
           CONFIG_TCP_CONG_BBR=y
           EOF
 
-
       # ============================================================
-      # CONFIGURE GKI
+      # CONFIGURE KERNEL
       # ============================================================
 
       - name: Configure GKI
@@ -634,7 +641,6 @@ jobs:
           OUT="$GITHUB_WORKSPACE/out"
 
           rm -rf "$OUT"
-
           mkdir -p "$OUT"
 
           make \
@@ -647,26 +653,17 @@ jobs:
             --set-str CONFIG_LOCALVERSION \
             "-${{ inputs.KERNEL_NAME }}"
 
-          # KERNELSU
-
           if [ "${{ inputs.ENABLE_KSU }}" = "true" ] || \
              [[ "${{ inputs.FEATURE_SET }}" == *"KSU"* ]] || \
              [ "${{ inputs.FEATURE_SET }}" = "FULL" ]; then
 
-            if grep -Rqs \
-              '^config KSU$' \
-              drivers/kernelsu \
-              2>/dev/null; then
-
+            if grep -Rqs '^config KSU$' drivers/kernelsu 2>/dev/null; then
               scripts/config \
                 --file "$OUT/.config" \
                 --enable CONFIG_KSU
-
             fi
 
           fi
-
-          # SUSFS
 
           if [ "${{ inputs.ENABLE_SUSFS }}" = "true" ] || \
              [[ "${{ inputs.FEATURE_SET }}" == *"SUSFS"* ]] || \
@@ -693,61 +690,49 @@ jobs:
                 . \
                 --include='Kconfig' \
                 --include='Kconfig.*' \
-                2>/dev/null; then
-
+                2>/dev/null
+              then
                 scripts/config \
                   --file "$OUT/.config" \
                   --enable "$CONFIG"
-
               fi
 
             done
 
           fi
 
-          # APPLY CONFIG FILE FUNCTION
+          for CONFIG_FILE in \
+            "$GITHUB_WORKSPACE/droidspaces.config" \
+            "$GITHUB_WORKSPACE/networking.config"
+          do
 
-          apply_config() {
+            if [ -f "$CONFIG_FILE" ]; then
 
-            local FILE="$1"
+              while IFS='=' read -r KEY VALUE; do
 
-            [ -f "$FILE" ] || return 0
+                [ -z "$KEY" ] && continue
 
-            while IFS='=' read -r KEY VALUE; do
+                case "$VALUE" in
 
-              [ -z "$KEY" ] && continue
+                  y)
+                    scripts/config \
+                      --file "$OUT/.config" \
+                      --enable "$KEY"
+                    ;;
 
-              case "$VALUE" in
+                  m)
+                    scripts/config \
+                      --file "$OUT/.config" \
+                      --module "$KEY"
+                    ;;
 
-                y)
-                  scripts/config \
-                    --file "$OUT/.config" \
-                    --enable "$KEY"
-                  ;;
+                esac
 
-                m)
-                  scripts/config \
-                    --file "$OUT/.config" \
-                    --module "$KEY"
-                  ;;
+              done < "$CONFIG_FILE"
 
-                n)
-                  scripts/config \
-                    --file "$OUT/.config" \
-                    --disable "$KEY"
-                  ;;
+            fi
 
-              esac
-
-            done < "$FILE"
-
-          }
-
-          apply_config "$GITHUB_WORKSPACE/droidspaces.config"
-
-          apply_config "$GITHUB_WORKSPACE/networking.config"
-
-          # BTF
+          done
 
           if [ "${{ inputs.ENABLE_BTF }}" = "true" ]; then
 
@@ -766,58 +751,17 @@ jobs:
             ARCH=arm64 \
             olddefconfig
 
+          test -f "$OUT/.config"
+
+          echo
           echo "=========================================="
           echo "FINAL CONFIG"
           echo "=========================================="
 
           grep -E \
-            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_SYSVIPC=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_DEBUG_INFO_BTF=' \
+            'CONFIG_LOCALVERSION=|CONFIG_KSU=|CONFIG_KSU_SUSFS|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=|CONFIG_IPC_NS=|CONFIG_PID_NS=|CONFIG_USER_NS=|CONFIG_DEBUG_INFO_BTF=' \
             "$OUT/.config" \
             || true
-
-
-      # ============================================================
-      # LOCATE CLANG
-      # ============================================================
-
-      - name: Locate Google Clang
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CLANG_ROOT="$(
-            find \
-              "$GITHUB_WORKSPACE/gki/prebuilts/clang/host/linux-x86" \
-              -type f \
-              -name clang \
-              -executable \
-              -printf '%h\n' \
-              2>/dev/null \
-              | sed 's:/bin$::' \
-              | sort -r \
-              | head -n1
-          )"
-
-          if [ -z "$CLANG_ROOT" ]; then
-
-            echo "ERROR: Google Clang not found."
-
-            find \
-              "$GITHUB_WORKSPACE/gki/prebuilts" \
-              -type f \
-              -name clang \
-              2>/dev/null \
-              | head -20
-
-            exit 1
-
-          fi
-
-          echo "CLANG_ROOT=$CLANG_ROOT" >> "$GITHUB_ENV"
-
-          echo "Using Google Clang:"
-          echo "$CLANG_ROOT"
-
 
       # ============================================================
       # BUILD
@@ -829,58 +773,42 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "=========================================="
+          echo "BUILDING GKI 5.15"
+          echo "=========================================="
+
           if [ "${{ inputs.BUILD_JOBS }}" = "0" ]; then
-
             JOBS="$(nproc)"
-
           else
-
             JOBS="${{ inputs.BUILD_JOBS }}"
-
           fi
 
-          # Avoid exhausting memory and swap.
-
-          if [ "$JOBS" -gt 4 ]; then
-            JOBS=4
-          fi
-
-          export PATH="$CLANG_ROOT/bin:$PATH"
+          export PATH="$PROTON_CLANG/bin:$PATH"
 
           if [ "${{ inputs.ENABLE_CCACHE }}" = "true" ]; then
-            export PATH="/usr/lib/ccache:$PATH"
+            export CC="ccache clang"
+          else
+            export CC="clang"
           fi
 
-          echo "=========================================="
-          echo "COMPILER"
-          echo "=========================================="
-
+          echo "Compiler:"
           command -v clang
-
           clang --version
 
           echo
-
-          echo "Build jobs: $JOBS"
-
-          # The Google Android 5.15 tree can trigger
-          # -Wframe-larger-than in io_uring with newer Clang.
-          # Disable that warning-as-error for this build.
-
-          export KCFLAGS="-Wno-error=frame-larger-than"
+          echo "Jobs: $JOBS"
 
           make \
             O="$GITHUB_WORKSPACE/out" \
             ARCH=arm64 \
             LLVM=1 \
             LLVM_IAS=1 \
+            CC="$CC" \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="$KCFLAGS" \
             -j"$JOBS" \
             Image \
             Image.gz \
             dtbs
-
 
       # ============================================================
       # CCACHE STATS
@@ -890,46 +818,34 @@ jobs:
         if: always()
         shell: bash
         run: |
-          ccache --show-stats || true
-
-          ccache --show-cache || true
-
+          ccache -s || true
 
       # ============================================================
       # VERIFY OUTPUT
       # ============================================================
 
-      - name: Verify Kernel
+      - name: Verify Kernel Output
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s \
-            out/arch/arm64/boot/Image
+          test -s "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image"
+          test -s "$GITHUB_WORKSPACE/out/.config"
 
-          echo "=========================================="
-          echo "KERNEL OUTPUT"
-          echo "=========================================="
+          echo "Kernel:"
+          ls -lh "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image"
 
-          ls -lh \
-            out/arch/arm64/boot/Image
-
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-
-            ls -lh \
-              out/arch/arm64/boot/Image.gz
-
+          if [ -f "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz" ]; then
+            ls -lh "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz"
           fi
 
           echo
+          echo "Linux version:"
 
           strings \
-            out/arch/arm64/boot/Image \
-            | grep \
-              -m1 \
-              '^Linux version ' \
+            "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image" \
+            | grep -m1 '^Linux version ' \
             || true
-
 
       # ============================================================
       # PACKAGE
@@ -940,43 +856,49 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf output
-
-          mkdir -p output
+          rm -rf "$GITHUB_WORKSPACE/output"
+          mkdir -p "$GITHUB_WORKSPACE/output"
 
           cp \
-            out/arch/arm64/boot/Image \
-            output/Image
+            "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image" \
+            "$GITHUB_WORKSPACE/output/Image"
 
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-
+          if [ -f "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz" ]; then
             cp \
-              out/arch/arm64/boot/Image.gz \
-              output/Image.gz
-
+              "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz" \
+              "$GITHUB_WORKSPACE/output/Image.gz"
           fi
 
           cp \
-            out/.config \
-            output/kernel-config
+            "$GITHUB_WORKSPACE/out/.config" \
+            "$GITHUB_WORKSPACE/output/kernel-config"
 
-          cat > output/build-info.txt <<EOF
+          cat > "$GITHUB_WORKSPACE/output/build-info.txt" <<EOF
+          ==========================================
+          GKI KERNEL BUILD
+          ==========================================
+
           Kernel Name: ${{ inputs.KERNEL_NAME }}
           Android: 13
           Kernel: 5.15
           Manifest: ${{ inputs.KERNEL_BRANCH }}
           Defconfig: ${{ inputs.DEFCONFIG_NAME }}
           Feature Set: ${{ inputs.FEATURE_SET }}
+
           KernelSU: ${{ inputs.ENABLE_KSU }}
           SUSFS: ${{ inputs.ENABLE_SUSFS }}
+          Baseband Guard: ${{ inputs.ENABLE_BBG }}
           DroidSpaces: ${{ inputs.ENABLE_DROIDSPACES }}
           Networking: ${{ inputs.ENABLE_NETWORKING }}
           BTF: ${{ inputs.ENABLE_BTF }}
           ccache: ${{ inputs.ENABLE_CCACHE }}
-          Build Date: $(date -u)
+          Skip Disk Cleanup: ${{ inputs.SKIP_DISK_CLEANUP }}
+
+          Build Date:
+          $(date -u)
           EOF
 
-          cd output
+          cd "$GITHUB_WORKSPACE/output"
 
           zip \
             -9 \
@@ -984,25 +906,8 @@ jobs:
             "../${{ inputs.KERNEL_NAME }}-GKI-5.15.zip" \
             .
 
-
       # ============================================================
-      # CLEAN SOURCE BEFORE ARTIFACT UPLOAD
-      # ============================================================
-
-      - name: Free Space Before Upload
-        if: always()
-        shell: bash
-        run: |
-          rm -rf \
-            "$GITHUB_WORKSPACE/gki/.repo/project-objects" \
-            "$GITHUB_WORKSPACE/gki/.repo/projects" \
-            2>/dev/null || true
-
-          df -h
-
-
-      # ============================================================
-      # UPLOAD PACKAGE
+      # UPLOAD ARTIFACTS
       # ============================================================
 
       - name: Upload Kernel Package
@@ -1013,14 +918,9 @@ jobs:
             ${{ inputs.KERNEL_NAME }}-GKI-5.15.zip
             output/build-info.txt
           if-no-files-found: error
-          compression-level: 6
+          compression-level: 9
 
-
-      # ============================================================
-      # UPLOAD IMAGE
-      # ============================================================
-
-      - name: Upload Image
+      - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.KERNEL_NAME }}-Image
@@ -1028,21 +928,15 @@ jobs:
             out/arch/arm64/boot/Image
             out/arch/arm64/boot/Image.gz
           if-no-files-found: warn
-          compression-level: 6
+          compression-level: 9
 
-
-      # ============================================================
-      # UPLOAD CONFIG
-      # ============================================================
-
-      - name: Upload Config
+      - name: Upload Kernel Config
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.KERNEL_NAME }}-Config
           path: out/.config
-          if-no-files-found: warn
-          compression-level: 6
-
+          if-no-files-found: error
+          compression-level: 9
 
       # ============================================================
       # SUMMARY
@@ -1063,13 +957,10 @@ jobs:
             echo "| Features | ${{ inputs.FEATURE_SET }} |"
             echo "| KernelSU | ${{ inputs.ENABLE_KSU }} |"
             echo "| SUSFS | ${{ inputs.ENABLE_SUSFS }} |"
+            echo "| Baseband Guard | ${{ inputs.ENABLE_BBG }} |"
             echo "| DroidSpaces | ${{ inputs.ENABLE_DROIDSPACES }} |"
             echo "| Networking | ${{ inputs.ENABLE_NETWORKING }} |"
             echo "| BTF | ${{ inputs.ENABLE_BTF }} |"
             echo "| ccache | ${{ inputs.ENABLE_CCACHE }} |"
-            echo
-            echo "### Disk"
-            echo '```'
-            df -h
-            echo '```'
+            echo "| Skip disk cleanup | ${{ inputs.SKIP_DISK_CLEANUP }} |"
           } >> "$GITHUB_STEP_SUMMARY"
