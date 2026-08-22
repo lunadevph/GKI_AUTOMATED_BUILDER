@@ -652,6 +652,10 @@ jobs:
             --set-str CONFIG_LOCALVERSION \
             "-${{ inputs.KERNEL_NAME }}"
 
+          scripts/config \
+            --file "$OUT/.config" \
+            --disable CONFIG_WERROR
+
           if [ "${{ inputs.ENABLE_KSU }}" = "true" ] || \
              [[ "${{ inputs.FEATURE_SET }}" == *"KSU"* ]] || \
              [ "${{ inputs.FEATURE_SET }}" = "FULL" ]; then
