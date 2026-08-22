@@ -834,6 +834,7 @@ jobs:
             LLVM_IAS=1 \
             CC="$CC" \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTLDFLAGS="-B/usr/bin/" \
             -j"$JOBS" \
             Image \
             Image.gz \
