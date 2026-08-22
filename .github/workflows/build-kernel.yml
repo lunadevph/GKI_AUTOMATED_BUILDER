@@ -942,6 +942,100 @@ jobs:
             .
 
       # ============================================================
+      # ANYKERNEL3
+      # ============================================================
+
+      - name: Package AnyKernel3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/anykernel"
+
+          git clone \
+            --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            "$GITHUB_WORKSPACE/anykernel"
+
+          rm -rf "$GITHUB_WORKSPACE/anykernel/.git"
+
+          rm -f \
+            "$GITHUB_WORKSPACE/anykernel/README.md" \
+            "$GITHUB_WORKSPACE/anykernel/anykernel.sh" \
+            "$GITHUB_WORKSPACE/anykernel/.gitignore"
+
+          cat > "$GITHUB_WORKSPACE/anykernel/anykernel.sh" <<'AK3EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          # global properties
+          properties() {
+            kernel.string={KERNEL_STRING}
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            do.cleanuponabort=0
+            device.name1=serenity
+            supported.versions=
+            supported.patchlevels=
+            supported.vendorpatchlevels=
+          } # end properties
+
+          ### AnyKernel install
+          ## boot files attributes
+          boot_attributes() {
+            set_perm_recursive 0 0 755 644 $RAMDISK/*;
+            set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          } # end attributes
+
+          # boot shell variables
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # boot install
+          split_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
+
+          flash_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
+          ## end boot install
+          AK3EOF
+
+          sed -i \
+            "s|{KERNEL_STRING}|${{ inputs.KERNEL_NAME }}|g" \
+            "$GITHUB_WORKSPACE/anykernel/anykernel.sh"
+
+          if grep -q "{KERNEL_STRING}" "$GITHUB_WORKSPACE/anykernel/anykernel.sh"; then
+            echo "ERROR: kernel.string placeholder was not replaced."
+            exit 1
+          fi
+
+          cp \
+            "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image" \
+            "$GITHUB_WORKSPACE/anykernel/Image"
+
+          if [ -f "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz" ]; then
+
+            cp \
+              "$GITHUB_WORKSPACE/out/arch/arm64/boot/Image.gz" \
+              "$GITHUB_WORKSPACE/anykernel/Image.gz"
+
+          fi
+
+          cd "$GITHUB_WORKSPACE/anykernel"
+
+          zip \
+            -9 \
+            -r \
+            "../${{ inputs.KERNEL_NAME }}-AnyKernel3.zip" \
+            .
+
+      # ============================================================
       # UPLOAD ARTIFACTS
       # ============================================================
 
@@ -974,6 +1068,14 @@ jobs:
           if-no-files-found: error
           compression-level: 9
 
+      - name: Upload AnyKernel3 Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.KERNEL_NAME }}-AnyKernel3
+          path: ${{ inputs.KERNEL_NAME }}-AnyKernel3.zip
+          if-no-files-found: error
+          compression-level: 9
+
       # ============================================================
       # SUMMARY
       # ============================================================
@@ -999,4 +1101,5 @@ jobs:
             echo "| BTF | ${{ inputs.ENABLE_BTF }} |"
             echo "| ccache | ${{ inputs.ENABLE_CCACHE }} |"
             echo "| Skip disk cleanup | ${{ inputs.SKIP_DISK_CLEANUP }} |"
+            echo "| AnyKernel3 | yes (device: serenity) |"
           } >> "$GITHUB_STEP_SUMMARY"
