@@ -839,6 +839,7 @@ jobs:
             CC="$CC" \
             CROSS_COMPILE=aarch64-linux-gnu- \
             HOSTLDFLAGS="-B/usr/bin/" \
+            KCFLAGS="-Wno-error" \
             -j"$JOBS" \
             Image \
             Image.gz \
@@ -969,6 +970,7 @@ jobs:
         with:
           name: ${{ inputs.KERNEL_NAME }}-Config
           path: out/.config
+          include-hidden-files: true
           if-no-files-found: error
           compression-level: 9
 
